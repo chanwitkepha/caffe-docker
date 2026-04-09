@@ -3,7 +3,8 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# 1) deps
+# 1) deps (+ pycaffe deps)
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     git cmake pkg-config build-essential \
@@ -13,9 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libleveldb-dev libsnappy-dev liblmdb-dev \
     libopenblas-dev \
     libboost-all-dev \
+    libboost-python-dev \
     libgflags-dev libgoogle-glog-dev \
     libgtest-dev \
     python3-dev python3-pip python3-numpy python3-setuptools python3-wheel \
+    python3-protobuf \
+    python3-skimage \
  && rm -rf /var/lib/apt/lists/*
 
 # 2) caffe
@@ -24,15 +28,16 @@ WORKDIR /opt/caffe
 
 COPY Makefile.config /opt/caffe/Makefile.config
 
-# 3) Fix OpenCV linking issue:
-#    - Caffe Makefile รุ่นเก่ามักเพิ่ม opencv_imgcodecs เฉพาะ OPENCV_VERSION=3
-#    - OpenCV4 ใช้ได้กับ branch 3 ของ Caffe ได้มากกว่า จึง force เป็น 3
-#    - และเติม LIBRARIES += opencv_imgcodecs กันพลาด
+# 3) Fix OpenCV linking issue (เหมือนเดิม)
 RUN set -eux; \
     sed -i 's/^OPENCV_VERSION := .*/OPENCV_VERSION := 3/' Makefile.config || true; \
     grep -q '^LIBRARIES \+= opencv_imgcodecs' Makefile.config || echo 'LIBRARIES += opencv_imgcodecs' >> Makefile.config
 
-# 4) Patch OpenCV legacy macros -> IMREAD_* (robust)
+# 3.1) เปิด Python layer สำหรับ pycaffe (สำคัญมาก)
+RUN set -eux; \
+    grep -q '^WITH_PYTHON_LAYER := 1' Makefile.config || echo 'WITH_PYTHON_LAYER := 1' >> Makefile.config
+
+# 4) Patch OpenCV legacy macros -> IMREAD_* (เหมือนเดิม)
 RUN set -eux; \
     cd /opt/caffe; \
     mapfile -t files < <(grep -RIl "CV_LOAD_IMAGE_" . || true); \
@@ -48,13 +53,18 @@ RUN set -eux; \
       done; \
     fi
 
-# 5) build
-RUN make -j"$(nproc)" all
+# 5) build caffe + pycaffe
+RUN make -j"$(nproc)" all && \
+    make -j"$(nproc)" pycaffe
 
-# (ถ้าคุณยังอยากให้ผ่าน pycaffe/test ทีหลังค่อยเปิด)
-# RUN make -j"$(nproc)" pycaffe && make -j"$(nproc)" test
-
-# ป้องกัน warning undefined var ตอน build
+# 6) ให้ python หา caffe module ได้
 ENV PYTHONPATH=/opt/caffe/python
+
+
+# เพิ่มบรรทัดนี้: ให้ dynamic linker หา libcaffe.so ได้
+ENV LD_LIBRARY_PATH=/opt/caffe/.build_release/lib:/opt/caffe/build/lib:${LD_LIBRARY_PATH}
+
+# 7) sanity check: ต้องผ่าน
+RUN python3 -c "import caffe; print('Caffe with Python3 is working!')"
 
 CMD ["/bin/bash"]
